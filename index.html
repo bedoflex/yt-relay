@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<!--
+  bedoflex Loading - YouTube relay page
+  -----------------------------------------------------------------------------
+  YouTube blocks embeds that are opened from pages without a web address
+  (error 153). FiveM loading screens run from nui://, so they need this small
+  page hosted on any https website (GitHub Pages, Cloudflare Pages, your own site).
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>YouTube relay</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
+    #wrap { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+    #wrap iframe {
+      position: absolute; top: 50%; left: 50%; border: 0;
+      width: max(100vw, 177.78vh); height: max(100vh, 56.25vw);
+      transform: translate(-50%, -50%) scale(1.02);
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap"><div id="player"></div></div>
+  <script>
+    (function () {
+      var q = new URLSearchParams(location.search);
+      var id = (q.get('v') || '').replace(/[^a-zA-Z0-9_-]/g, '');
+      var start = parseInt(q.get('start') || '0', 10) || 0;
+      var player = null;
+      var pending = [];
+
+      function send(data) {
+        data.source = 'bedoflex-relay';
+        try { parent.postMessage(data, '*'); } catch (e) {}
+      }
+
+      function run(func, args) {
+        if (!player || typeof player[func] !== 'function') { pending.push([func, args]); return; }
+        try { player[func].apply(player, args || []); } catch (e) {}
+      }
+
+      // Commands from the loading screen
+      window.addEventListener('message', function (e) {
+        var d = e.data || {};
+        if (d.source !== 'bedoflex' || typeof d.func !== 'string') return;
+        if (['playVideo', 'pauseVideo', 'mute', 'unMute', 'setVolume'].indexOf(d.func) === -1) return;
+        run(d.func, d.args);
+      });
+
+      if (!id) { send({ event: 'error', code: 'no-id' }); return; }
+
+      window.onYouTubeIframeAPIReady = function () {
+        player = new YT.Player('player', {
+          videoId: id,
+          host: 'https://www.youtube.com',
+          playerVars: {
+            autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3,
+            modestbranding: 1, rel: 0, playsinline: 1, start: start, loop: 1, playlist: id,
+            origin: location.origin
+          },
+          events: {
+            onReady: function (ev) {
+              ev.target.playVideo();
+              var list = pending; pending = [];
+              list.forEach(function (c) { run(c[0], c[1]); });
+              send({ event: 'ready' });
+            },
+            onStateChange: function (ev) {
+              if (ev.data === YT.PlayerState.PLAYING) send({ event: 'playing' });
+              if (ev.data === YT.PlayerState.ENDED) { ev.target.seekTo(start, true); ev.target.playVideo(); }
+            },
+            onError: function (ev) { send({ event: 'error', code: ev.data }); }
+          }
+        });
+      };
+
+      var s = document.createElement('script');
+      s.src = 'https://www.youtube.com/iframe_api';
+      s.onerror = function () { send({ event: 'error', code: 'api' }); };
+      document.head.appendChild(s);
+    })();
+  </script>
+</body>
+</html>
