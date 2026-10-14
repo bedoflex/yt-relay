@@ -1,10 +1,16 @@
 <!DOCTYPE html>
 <!--
-  bedoflex Loading - YouTube relay page
+  bedoflex Loading - YouTube relay page (v2)
   -----------------------------------------------------------------------------
   YouTube blocks embeds that are opened from pages without a web address
   (error 153). FiveM loading screens run from nui://, so they need this small
   page hosted on any https website (GitHub Pages, Cloudflare Pages, your own site).
+
+  URL parameters (set automatically by the loading screen):
+    v      video id
+    start  start time in seconds
+    q      "max" = render the player at 2x size so YouTube streams its highest quality
+    z      zoom (1.0 - 1.6) - crops the edges (hides burned-in subtitles / watermarks)
 -->
 <html lang="en">
 <head>
@@ -17,8 +23,9 @@
     #wrap { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
     #wrap iframe {
       position: absolute; top: 50%; left: 50%; border: 0;
-      width: max(100vw, 177.78vh); height: max(100vh, 56.25vw);
-      transform: translate(-50%, -50%) scale(1.02);
+      width: calc(max(100vw, 177.78vh) * var(--k, 1));
+      height: calc(max(100vh, 56.25vw) * var(--k, 1));
+      transform: translate(-50%, -50%) scale(calc(var(--z, 1) / var(--k, 1)));
     }
   </style>
 </head>
@@ -29,19 +36,39 @@
       var q = new URLSearchParams(location.search);
       var id = (q.get('v') || '').replace(/[^a-zA-Z0-9_-]/g, '');
       var start = parseInt(q.get('start') || '0', 10) || 0;
+      var maxQuality = q.get('q') !== 'auto';
+      var zoom = Math.min(1.6, Math.max(1, parseFloat(q.get('z') || '1.02') || 1.02));
       var player = null;
       var pending = [];
+
+      // YouTube picks the stream quality from the player size; rendering it at 2x and scaling
+      // it down makes YouTube stream the highest available quality (1440p / 2160p).
+      document.documentElement.style.setProperty('--k', maxQuality ? '2' : '1');
+      document.documentElement.style.setProperty('--z', String(zoom));
 
       function send(data) {
         data.source = 'bedoflex-relay';
         try { parent.postMessage(data, '*'); } catch (e) {}
       }
 
-      // Turn subtitles off (YouTube may enable them from the viewer's own settings)
+      // Subtitles: YouTube loads the captions module late and may enable it from the
+      // viewer's account settings, so it is switched off every time the module appears.
       function noCaptions(p) {
+        if (!p) return;
         try { p.setOption('captions', 'track', {}); } catch (e) {}
+        try { p.setOption('cc', 'track', {}); } catch (e) {}
         try { p.unloadModule('captions'); } catch (e) {}
         try { p.unloadModule('cc'); } catch (e) {}
+      }
+
+      function bestQuality(p) {
+        if (!maxQuality || !p) return;
+        try {
+          var levels = p.getAvailableQualityLevels() || [];
+          var best = levels.filter(function (l) { return l !== 'auto'; })[0] || 'highres';
+          p.setPlaybackQualityRange(best, best);
+          p.setPlaybackQuality(best);
+        } catch (e) {}
       }
 
       function run(func, args) {
@@ -66,28 +93,33 @@
           playerVars: {
             autoplay: 1, mute: 1, controls: 0, disablekb: 1, fs: 0, iv_load_policy: 3,
             modestbranding: 1, rel: 0, playsinline: 1, start: start, loop: 1, playlist: id,
-            cc_load_policy: 0,
+            cc_load_policy: 0, vq: maxQuality ? 'hd2160' : 'auto',
             origin: location.origin
           },
           events: {
             onReady: function (ev) {
               noCaptions(ev.target);
+              bestQuality(ev.target);
               ev.target.playVideo();
               var list = pending; pending = [];
               list.forEach(function (c) { run(c[0], c[1]); });
               send({ event: 'ready' });
             },
+            onApiChange: function (ev) { noCaptions(ev.target); },
             onStateChange: function (ev) {
-              if (ev.data === YT.PlayerState.PLAYING) {
+              if (ev.data === YT.PlayerState.PLAYING || ev.data === YT.PlayerState.BUFFERING) {
                 noCaptions(ev.target);
-                setTimeout(function () { noCaptions(ev.target); }, 1500);
-                send({ event: 'playing' });
+                bestQuality(ev.target);
               }
+              if (ev.data === YT.PlayerState.PLAYING) send({ event: 'playing' });
               if (ev.data === YT.PlayerState.ENDED) { ev.target.seekTo(start, true); ev.target.playVideo(); }
             },
             onError: function (ev) { send({ event: 'error', code: ev.data }); }
           }
         });
+        // keep subtitles off during the first seconds (module can load at any time)
+        var n = 0;
+        var t = setInterval(function () { noCaptions(player); if (++n > 20) clearInterval(t); }, 500);
       };
 
       var s = document.createElement('script');
